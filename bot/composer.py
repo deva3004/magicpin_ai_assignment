@@ -61,7 +61,15 @@ from bot.voice import count_ctas, find_taboo_violations, load_voice
 
 load_dotenv()
 
-LLM_TIMEOUT_SECONDS = 12.0
+# testing-brief §5's real constraint is the judge's 30s-per-call budget on
+# /v1/tick and /v1/reply, not an arbitrary internal number. 20s leaves ~10s
+# margin for the rest of the pipeline (parsing, validation, network overhead)
+# while giving a reasoning model enough room to actually finish — 12s (the
+# original guess) was measured, during self-critique, to be too tight for
+# gpt-oss-120b on a full-size (~8K char) prompt: a call that took ~13-15s and
+# produced a genuinely good response was being cut off and silently dropped
+# to the fallback.
+LLM_TIMEOUT_SECONDS = 20.0
 
 _DEFAULT_MODELS = {
     "groq": "openai/gpt-oss-120b",
@@ -88,6 +96,12 @@ _PROVIDER_ENV_KEYS = {
 
 _JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}")
 _URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
+# Real prose never has 2+ underscores in one token; every internal id in this
+# dataset does (d_2026W17_jida_fluoride, trg_003_..., m_001_...). Deterministic
+# backstop against internal-id leakage, since prompt instructions alone proved
+# unreliable during self-critique (rule 10 in the system prompt still leaked
+# on a repeat call) — verified this doesn't false-positive on any gold example.
+_INTERNAL_ID_RE = re.compile(r"\w*_\w*_\w+")
 
 _CACHE: dict[str, ComposedMessage] = {}
 
@@ -110,9 +124,9 @@ def compose(
     send_as = "merchant_on_behalf" if customer else "vera"
     suppression_key = trigger.get("suppression_key", "")
     voice = load_voice(category)
-    bundle = {"category": category, "merchant": merchant, "trigger": trigger, "customer": customer}
+    bundle = _build_bundle(category, merchant, trigger, customer)
 
-    result = _try_llm_compose(merchant, trigger, customer, voice, bundle, send_as, suppression_key)
+    result = _try_llm_compose(voice, bundle, send_as, suppression_key)
     if result is None:
         body, cta = _compose_fallback(merchant, trigger, customer)
         result = ComposedMessage(
@@ -258,6 +272,8 @@ def _passes_validation(body: str, cta: str, claims: list[Claim], voice, bundle: 
         return False
     if find_taboo_violations(body, voice):
         return False
+    if _INTERNAL_ID_RE.search(body):
+        return False
 
     # NOT requiring exactly one '?' when cta != "none", and NOT gating on
     # has_buried_cta — both were disproven by the real case studies during
@@ -277,12 +293,41 @@ def _passes_validation(body: str, cta: str, claims: list[Claim], voice, bundle: 
     return check_grounding(body, claims, bundle).ok
 
 
-def _try_llm_compose(
-    merchant: dict, trigger: dict, customer: Optional[dict], voice, bundle: dict[str, Any],
-    send_as: str, suppression_key: str,
-) -> Optional[ComposedMessage]:
+def _build_bundle(category: dict, merchant: dict, trigger: dict, customer: Optional[dict]) -> dict[str, Any]:
+    """Trims category/merchant context down to what's actually relevant before it
+    ever reaches the LLM or grounding — both must see the EXACT same structure,
+    since claim source_paths (e.g. "category.digest[0]") are resolved against
+    whatever bundle the LLM was shown, not the original untrimmed data.
+
+    Found necessary during self-critique: sending the full category JSON on
+    every call (all 5 digest items in full, when a trigger's payload.top_item_id
+    only ever needs one) was the single biggest driver of prompt token size,
+    and free-tier Groq's rate limit here is only 8000 tokens per window — large
+    enough to intermittently 429 on the full untrimmed prompt even outside of
+    this session's own rapid-fire debugging. testing-brief §5 allows up to 20
+    actions per /v1/tick, so this isn't just a dev-session artifact; it's a
+    real risk under judge load too.
+    """
+    trimmed_category = dict(category)
+    top_item_id = (trigger.get("payload") or {}).get("top_item_id")
+    digest = category.get("digest", [])
+    if top_item_id and digest:
+        matched = [d for d in digest if d.get("id") == top_item_id]
+        if matched:
+            trimmed_category["digest"] = matched
+    trimmed_category.pop("patient_content_library", None)
+
+    trimmed_merchant = dict(merchant)
+    history = merchant.get("conversation_history", [])
+    if len(history) > 5:
+        trimmed_merchant["conversation_history"] = history[-5:]
+
+    return {"category": trimmed_category, "merchant": trimmed_merchant, "trigger": trigger, "customer": customer}
+
+
+def _try_llm_compose(voice, bundle: dict[str, Any], send_as: str, suppression_key: str) -> Optional[ComposedMessage]:
     system_prompt = _build_system_prompt(voice)
-    user_prompt = _build_user_prompt(bundle["category"], merchant, trigger, customer, send_as)
+    user_prompt = _build_user_prompt(bundle["category"], bundle["merchant"], bundle["trigger"], bundle["customer"], send_as)
 
     raw = _call_llm(system_prompt, user_prompt)
     if raw is None:
@@ -349,3 +394,139 @@ def _compose_fallback(merchant: dict, trigger: dict, customer: Optional[dict]) -
 
     body = f"{greeting} — I noticed something worth flagging for your business. Want me to share the details?"
     return body, "open_ended"
+
+
+# ---------------------------------------------------------------------------
+# Reply composition — /v1/reply's content-generation path, used by
+# conversation.py. Reuses this module's existing LLM/grounding/voice pipeline
+# rather than duplicating it; conversation.py itself owns the deterministic
+# ROUTING decisions (auto-reply/hostile/intent detection, when to call this
+# at all) and only calls this function for the "actually generate a reply
+# body" case.
+# ---------------------------------------------------------------------------
+
+_REPLY_CACHE: dict[str, ComposedMessage] = {}
+
+
+def compose_reply(
+    category: dict[str, Any],
+    merchant: dict[str, Any],
+    trigger: dict[str, Any],
+    customer: Optional[dict[str, Any]],
+    prior_bodies: list[str],
+    latest_message: str,
+    intent_hint: Optional[str] = None,
+) -> ComposedMessage:
+    cache_key = _reply_cache_key(category, merchant, trigger, customer, prior_bodies, latest_message, intent_hint)
+    cached = _REPLY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    send_as = "merchant_on_behalf" if customer else "vera"
+    suppression_key = trigger.get("suppression_key", "")
+    voice = load_voice(category)
+    bundle = _build_bundle(category, merchant, trigger, customer)
+
+    result = _try_llm_reply(voice, bundle, prior_bodies, latest_message, intent_hint, send_as, suppression_key)
+    if result is None:
+        body, cta = _reply_fallback(intent_hint)
+        result = ComposedMessage(
+            body=body, cta=cta, send_as=send_as, suppression_key=suppression_key,
+            rationale="Deterministic fallback reply — LLM unavailable, timed out, or its output failed validation.",
+        )
+
+    _REPLY_CACHE[cache_key] = result
+    return result
+
+
+def _reply_cache_key(
+    category: dict, merchant: dict, trigger: dict, customer: Optional[dict],
+    prior_bodies: list[str], latest_message: str, intent_hint: Optional[str],
+) -> str:
+    blob = json.dumps(
+        {
+            "category": category, "merchant": merchant, "trigger": trigger, "customer": customer,
+            "prior_bodies": prior_bodies, "latest_message": latest_message, "intent_hint": intent_hint,
+        },
+        sort_keys=True, default=str,
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _build_reply_system_prompt(voice) -> str:
+    base = _build_system_prompt(voice)
+    return base + """
+
+You are now CONTINUING an existing conversation, not starting one — the merchant or customer just
+replied. Additional rules for this turn:
+11. NEVER repeat, verbatim or near-verbatim, anything you already said earlier in this conversation
+(listed below as "already sent"). Anti-repetition is a hard requirement.
+12. If they explicitly committed ("let's do it", "go ahead", "sign me up", etc.), do NOT ask another
+qualifying question — move straight to the concrete next action.
+13. If they asked something genuinely unrelated to this conversation's topic, briefly and politely
+decline (it's outside what you help with) in one clause, then redirect back to the original topic in
+the same message — don't just ignore the off-topic ask, and don't abandon the original topic either.
+14. Keep responding in the same language mix you've been using in this conversation."""
+
+
+def _build_reply_user_prompt(
+    category: dict, merchant: dict, trigger: dict, customer: Optional[dict],
+    prior_bodies: list[str], latest_message: str, intent_hint: Optional[str], send_as: str,
+) -> str:
+    base = _build_user_prompt(category, merchant, trigger, customer, send_as)
+    already_sent = "\n".join(f"- {b}" for b in prior_bodies) or "(nothing yet)"
+    hint_line = (
+        "\n\nThe latest message is an EXPLICIT COMMITMENT — switch to action mode, do not qualify further."
+        if intent_hint == "explicit_commitment" else ""
+    )
+    return f"""{base}
+
+ALREADY SENT IN THIS CONVERSATION (never repeat any of these):
+{already_sent}
+
+THEIR LATEST MESSAGE:
+{latest_message}
+{hint_line}
+
+Write your reply now."""
+
+
+def _try_llm_reply(
+    voice, bundle: dict[str, Any], prior_bodies: list[str], latest_message: str,
+    intent_hint: Optional[str], send_as: str, suppression_key: str,
+) -> Optional[ComposedMessage]:
+    system_prompt = _build_reply_system_prompt(voice)
+    user_prompt = _build_reply_user_prompt(
+        bundle["category"], bundle["merchant"], bundle["trigger"], bundle["customer"],
+        prior_bodies, latest_message, intent_hint, send_as,
+    )
+
+    raw = _call_llm(system_prompt, user_prompt)
+    if raw is None:
+        return None
+
+    parsed = _parse_llm_json(raw)
+    if parsed is None:
+        return None
+
+    body = str(parsed.get("body", "")).strip()
+    cta = str(parsed.get("cta", "none"))
+    rationale = str(parsed.get("rationale", "")).strip()
+    if not body or not rationale or body in prior_bodies:
+        return None
+
+    try:
+        claims = [Claim(**c) for c in parsed.get("claims", [])]
+    except Exception:
+        return None
+
+    if not _passes_validation(body, cta, claims, voice, bundle):
+        return None
+
+    return ComposedMessage(body=body, cta=cta, send_as=send_as, suppression_key=suppression_key, rationale=rationale)
+
+
+def _reply_fallback(intent_hint: Optional[str]) -> tuple[str, str]:
+    if intent_hint == "explicit_commitment":
+        return "Great — let's get started. I'll have the next step ready for you shortly.", "none"
+    return "Got it, thanks for the reply — I'll follow up shortly.", "none"
