@@ -219,9 +219,9 @@ def _cache_key(category: dict, merchant: dict, trigger: dict, customer: Optional
 # ---------------------------------------------------------------------------
 
 def _provider_config() -> tuple[str, str, str]:
-    provider = os.environ.get("LLM_PROVIDER", "groq").lower()
+    provider = os.environ.get("LLM_PROVIDER", "groq").strip().lower()
     provider_specific = os.environ.get(_PROVIDER_ENV_KEYS.get(provider, ""), "")
-    api_key = os.environ.get("LLM_API_KEY") or provider_specific
+    api_key = (os.environ.get("LLM_API_KEY") or provider_specific).strip()
     model = os.environ.get("LLM_MODEL") or _DEFAULT_MODELS.get(provider, "")
     return provider, api_key, model
 

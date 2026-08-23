@@ -241,6 +241,20 @@ def test_call_llm_skips_network_when_groq_budget_exhausted(monkeypatch):
     assert composer._call_llm("system", "user") is None
 
 
+def test_provider_config_strips_whitespace_from_api_key(monkeypatch):
+    # Found live: a trailing space pasted into a hosting provider's env var
+    # UI (or left in a local .env) makes httpx raise LocalProtocolError on
+    # the Authorization header — invisible in the fallback path since
+    # _call_llm swallows all exceptions, so it silently degrades to the
+    # template with no error surfaced. Stripping defensively here fixes the
+    # whole class of bug regardless of where the stray whitespace came from.
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "  gsk_test_key \n")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    provider, api_key, model = composer._provider_config()
+    assert api_key == "gsk_test_key"
+
+
 def test_call_llm_sends_low_reasoning_effort_for_groq(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "groq")
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
