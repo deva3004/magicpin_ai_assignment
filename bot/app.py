@@ -44,7 +44,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from bot.composer import _provider_config, compose
+from bot.composer import compose
 from bot.conversation import ConversationStore, handle_reply
 from bot.models import (
     ContextPushRequest, HealthzResponse, MetadataResponse, ReplyRequest, TickRequest,
@@ -59,45 +59,6 @@ START_TIME = time.time()
 context_store = ContextStore()
 suppression_store = SuppressionStore()
 conversation_store = ConversationStore()
-
-# TEMPORARY startup diagnostic — deployed to debug a live incident where the
-# LLM path silently degraded to the fallback with nothing visible in any API
-# response (composer.py's _call_llm intentionally swallows all exceptions so
-# a bad LLM call never breaks a live /v1/tick). Logs only safe, non-secret
-# facts (presence + length, never the key itself) to Render's log stream so
-# the deployed environment's actual key state is visible without shell
-# access (unavailable on Render's free tier). Remove once resolved.
-_diag_provider, _diag_api_key, _diag_model = _provider_config()
-print(
-    f"[startup diagnostic] provider={_diag_provider!r} model={_diag_model!r} "
-    f"api_key_present={bool(_diag_api_key)} api_key_length={len(_diag_api_key)}",
-    flush=True,
-)
-if _diag_api_key:
-    try:
-        import httpx as _diag_httpx
-        _diag_resp = _diag_httpx.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            json={
-                "model": _diag_model, "temperature": 0, "max_tokens": 5,
-                "reasoning_effort": "low",
-                "messages": [{"role": "user", "content": "ping"}],
-            },
-            headers={"Authorization": f"Bearer {_diag_api_key}", "content-type": "application/json"},
-            timeout=15.0,
-        )
-        # Response body is Groq's own text, never our request — safe to log.
-        print(
-            f"[startup diagnostic] live test call status={_diag_resp.status_code} "
-            f"body={_diag_resp.text[:200]!r}",
-            flush=True,
-        )
-    except Exception as _diag_exc:
-        # Deliberately NOT logging str(_diag_exc) — httpx's own
-        # LocalProtocolError embeds the full Authorization header value in
-        # its message (confirmed earlier this session), so only the safe
-        # exception type name is logged here.
-        print(f"[startup diagnostic] live test call raised {type(_diag_exc).__name__}", flush=True)
 
 MAX_ACTIONS_PER_TICK = 20  # testing-brief §5
 
