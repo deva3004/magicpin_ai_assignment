@@ -174,7 +174,7 @@ class OpenAIProvider(LLMProvider):
         req = urlrequest.Request(
             "https://api.openai.com/v1/chat/completions",
             data=body,
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (judge_simulator.py)"}
         )
         resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
         data = json.loads(resp.read().decode("utf-8"))
@@ -198,7 +198,7 @@ class AnthropicProvider(LLMProvider):
         req = urlrequest.Request(
             "https://api.anthropic.com/v1/messages",
             data=json.dumps(body_dict).encode("utf-8"),
-            headers={"x-api-key": self.api_key, "Content-Type": "application/json",
+            headers={"x-api-key": self.api_key, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (judge_simulator.py)",
                      "anthropic-version": "2023-06-01"}
         )
         resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
@@ -222,7 +222,7 @@ class GeminiProvider(LLMProvider):
         }).encode("utf-8")
 
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-        req = urlrequest.Request(url, data=body, headers={"Content-Type": "application/json"})
+        req = urlrequest.Request(url, data=body, headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (judge_simulator.py)"})
         resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
         data = json.loads(resp.read().decode("utf-8"))
         return data["candidates"][0]["content"]["parts"][0]["text"]
@@ -246,7 +246,7 @@ class DeepSeekProvider(LLMProvider):
             "https://api.deepseek.com/v1/chat/completions",
             data=json.dumps({"model": self.model, "messages": messages,
                             "temperature": 0.2, "max_tokens": 1500}).encode("utf-8"),
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (judge_simulator.py)"}
         )
         resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
         data = json.loads(resp.read().decode("utf-8"))
@@ -271,7 +271,7 @@ class GroqProvider(LLMProvider):
             "https://api.groq.com/openai/v1/chat/completions",
             data=json.dumps({"model": self.model, "messages": messages,
                             "temperature": 0.2, "max_tokens": 1500}).encode("utf-8"),
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (judge_simulator.py)"}
         )
         resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
         data = json.loads(resp.read().decode("utf-8"))
@@ -292,7 +292,7 @@ class OllamaProvider(LLMProvider):
             f"{self.api_url}/api/generate",
             data=json.dumps({"model": self.model, "prompt": full_prompt,
                             "stream": False, "options": {"temperature": 0.2}}).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
+            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (judge_simulator.py)"}
         )
         resp = urlrequest.urlopen(req, timeout=90)
         data = json.loads(resp.read().decode("utf-8"))
@@ -317,7 +317,7 @@ class OpenRouterProvider(LLMProvider):
             "https://openrouter.ai/api/v1/chat/completions",
             data=json.dumps({"model": self.model, "messages": messages,
                             "temperature": 0.2, "max_tokens": 1500}).encode("utf-8"),
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json",
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (judge_simulator.py)",
                      "HTTP-Referer": "https://magicpin.com"}
         )
         resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
