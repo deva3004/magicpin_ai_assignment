@@ -81,18 +81,15 @@ async def healthz() -> HealthzResponse:
 
 @app.get("/v1/metadata")
 async def metadata() -> MetadataResponse:
-    # PLACEHOLDER VALUES — team_name/team_members/contact_email are real
-    # information only the user has; filled in with obvious placeholders
-    # rather than invented, flagged for the user to replace before submission.
     return MetadataResponse(
-        team_name="PLACEHOLDER_TEAM_NAME",
-        team_members=["PLACEHOLDER_MEMBER_NAME"],
+        team_name="Devashish Tripathi",
+        team_members=["Devashish Tripathi"],
         model="groq/openai-gpt-oss-120b (fallback: deterministic template)",
         approach="4-context composer (category/merchant/trigger/customer) with a pure-Python "
                  "deterministic selection/consent/suppression layer, an LLM call at temperature=0 "
                  "gated by a fact-ledger grounding check + voice/taboo/CTA validation, and a "
                  "deterministic template fallback on any timeout/error/validation failure.",
-        contact_email="PLACEHOLDER_EMAIL@example.com",
+        contact_email="tripathidevashish07@gmail.com",
         version="0.1.0",
         submitted_at=datetime.now(timezone.utc).isoformat(),
     )
