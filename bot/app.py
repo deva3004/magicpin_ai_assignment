@@ -44,7 +44,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from bot.composer import compose
+from bot.composer import _provider_config, compose
 from bot.conversation import ConversationStore, handle_reply
 from bot.models import (
     ContextPushRequest, HealthzResponse, MetadataResponse, ReplyRequest, TickRequest,
@@ -59,6 +59,20 @@ START_TIME = time.time()
 context_store = ContextStore()
 suppression_store = SuppressionStore()
 conversation_store = ConversationStore()
+
+# TEMPORARY startup diagnostic — deployed to debug a live incident where the
+# LLM path silently degraded to the fallback with nothing visible in any API
+# response (composer.py's _call_llm intentionally swallows all exceptions so
+# a bad LLM call never breaks a live /v1/tick). Logs only safe, non-secret
+# facts (presence + length, never the key itself) to Render's log stream so
+# the deployed environment's actual key state is visible without shell
+# access (unavailable on Render's free tier). Remove once resolved.
+_diag_provider, _diag_api_key, _diag_model = _provider_config()
+print(
+    f"[startup diagnostic] provider={_diag_provider!r} model={_diag_model!r} "
+    f"api_key_present={bool(_diag_api_key)} api_key_length={len(_diag_api_key)}",
+    flush=True,
+)
 
 MAX_ACTIONS_PER_TICK = 20  # testing-brief §5
 
