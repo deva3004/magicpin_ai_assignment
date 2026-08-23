@@ -36,8 +36,14 @@ class LenientModel(BaseModel):
 # ---------------------------------------------------------------------------
 
 class VoiceProfile(LenientModel):
+    # "register" (as in register/tone of voice) collides with the `register`
+    # classmethod every pydantic model inherits from abc.ABCMeta — same
+    # keyword-collision problem as ConversationTurn.from_ below, just less
+    # obvious. Aliased for the same reason.
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
     tone: Optional[str] = None
-    register: Optional[str] = None
+    register_: Optional[str] = Field(default=None, alias="register")
     code_mix: Optional[str] = None
     vocab_allowed: list[str] = Field(default_factory=list)
     vocab_taboo: list[str] = Field(default_factory=list)
