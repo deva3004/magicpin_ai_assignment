@@ -61,14 +61,29 @@ def find_taboo_violations(body: str, voice: VoiceProfile) -> list[str]:
 
 
 def count_ctas(body: str) -> int:
-    """Every case-study CTA is phrased as exactly one '?' (zero when cta='none')."""
+    """Counts '?' characters as a rough proxy for distinct asks.
+
+    NOT a reliable "exactly one CTA = exactly one '?'" rule — case-studies.md's
+    own gold examples disprove that (Case Study 2's CTA, "Reply 1 for Wed, 2
+    for Thu, or tell us a time that works.", has zero question marks; it's an
+    imperative-style CTA, not a question). composer.py only uses this as an
+    upper-bound check (2+ questions is still a real multi-CTA red flag that
+    doesn't appear in any gold example), never as an exact-match requirement.
+    """
     return body.count("?")
 
 
 def has_buried_cta(body: str) -> bool:
     """True if a '?' exists but substantial content follows it (not just a short
     trailing source citation like '— JIDA Oct 2026 p.14', which several gold
-    examples legitimately have after the question mark)."""
+    examples legitimately have after the question mark).
+
+    NOT used as a hard validation gate in composer.py — Case Study 4's gold
+    CTA is a question in the MIDDLE of the message followed by two more
+    sentences of legitimate elaboration, which this function would (correctly,
+    by its own definition) flag as "buried." Kept available for advisory/
+    manual-review use, not enforcement.
+    """
     if "?" not in body:
         return False
     tail = body[body.rindex("?") + 1 :].strip()

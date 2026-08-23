@@ -161,4 +161,4 @@ def rank(
         scored.append((score(trg, now, merchant, customer), trg))
 
     scored.sort(key=lambda pair: (-pair[0], pair[1].get("id", "")))
-    return [trg for _score, trg in scored]
+    return [trg for _, trg in scored]
