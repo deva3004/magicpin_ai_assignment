@@ -73,6 +73,31 @@ print(
     f"api_key_present={bool(_diag_api_key)} api_key_length={len(_diag_api_key)}",
     flush=True,
 )
+if _diag_api_key:
+    try:
+        import httpx as _diag_httpx
+        _diag_resp = _diag_httpx.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            json={
+                "model": _diag_model, "temperature": 0, "max_tokens": 5,
+                "reasoning_effort": "low",
+                "messages": [{"role": "user", "content": "ping"}],
+            },
+            headers={"Authorization": f"Bearer {_diag_api_key}", "content-type": "application/json"},
+            timeout=15.0,
+        )
+        # Response body is Groq's own text, never our request — safe to log.
+        print(
+            f"[startup diagnostic] live test call status={_diag_resp.status_code} "
+            f"body={_diag_resp.text[:200]!r}",
+            flush=True,
+        )
+    except Exception as _diag_exc:
+        # Deliberately NOT logging str(_diag_exc) — httpx's own
+        # LocalProtocolError embeds the full Authorization header value in
+        # its message (confirmed earlier this session), so only the safe
+        # exception type name is logged here.
+        print(f"[startup diagnostic] live test call raised {type(_diag_exc).__name__}", flush=True)
 
 MAX_ACTIONS_PER_TICK = 20  # testing-brief §5
 
