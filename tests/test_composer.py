@@ -24,9 +24,13 @@ CATEGORY = {
 def clear_caches():
     composer._CACHE.clear()
     composer._REPLY_CACHE.clear()
+    composer._rate_limit_state["remaining_tokens"] = None
+    composer._rate_limit_state["resets_at"] = None
     yield
     composer._CACHE.clear()
     composer._REPLY_CACHE.clear()
+    composer._rate_limit_state["remaining_tokens"] = None
+    composer._rate_limit_state["resets_at"] = None
 
 
 # ---------------------------------------------------------------------------
@@ -173,3 +177,93 @@ def test_compose_falls_back_on_malformed_json(monkeypatch):
     monkeypatch.setattr(composer, "_call_llm", lambda *a, **kw: "not json at all {{{")
     result = composer.compose(CATEGORY, _merchant(), _trigger())
     assert "fallback" in result.rationale.lower()
+
+
+# ---------------------------------------------------------------------------
+# Groq free-tier rate-limit tracking — reasoning_effort + preemptive skip.
+# Verified live against Groq (see problemFaced.txt): reasoning_effort="low"
+# is a real accepted param that cuts hidden chain-of-thought tokens, and
+# Groq returns x-ratelimit-remaining-tokens/-reset-tokens on every response.
+# ---------------------------------------------------------------------------
+
+def test_parse_reset_seconds_plain():
+    assert composer._parse_reset_seconds("14.309s") == pytest.approx(14.309)
+
+
+def test_parse_reset_seconds_with_minutes():
+    assert composer._parse_reset_seconds("2m3.5s") == pytest.approx(123.5)
+
+
+def test_rate_limit_not_exhausted_when_no_state_recorded():
+    assert not composer._rate_limit_likely_exhausted(1000)
+
+
+def test_rate_limit_exhausted_when_remaining_below_estimate():
+    composer._rate_limit_state["remaining_tokens"] = 100.0
+    composer._rate_limit_state["resets_at"] = composer.time.monotonic() + 30
+    assert composer._rate_limit_likely_exhausted(1000)
+
+
+def test_rate_limit_not_exhausted_once_reset_window_has_passed():
+    composer._rate_limit_state["remaining_tokens"] = 100.0
+    composer._rate_limit_state["resets_at"] = composer.time.monotonic() - 1  # already elapsed
+    assert not composer._rate_limit_likely_exhausted(1000)
+
+
+def test_update_rate_limit_state_reads_groq_headers():
+    class FakeResp:
+        headers = {"x-ratelimit-remaining-tokens": "4200", "x-ratelimit-reset-tokens": "10s"}
+
+    composer._update_rate_limit_state(FakeResp())
+    assert composer._rate_limit_state["remaining_tokens"] == 4200.0
+    assert composer._rate_limit_state["resets_at"] > composer.time.monotonic()
+
+
+def test_update_rate_limit_state_ignores_response_without_headers():
+    class FakeResp:
+        headers: dict = {}
+
+    composer._update_rate_limit_state(FakeResp())
+    assert composer._rate_limit_state["remaining_tokens"] is None
+
+
+def test_call_llm_skips_network_when_groq_budget_exhausted(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    composer._rate_limit_state["remaining_tokens"] = 10.0
+    composer._rate_limit_state["resets_at"] = composer.time.monotonic() + 30
+
+    def _fail_if_called(*a, **kw):
+        raise AssertionError("httpx.post should not be called when budget is exhausted")
+
+    monkeypatch.setattr(composer.httpx, "post", _fail_if_called)
+    assert composer._call_llm("system", "user") is None
+
+
+def test_call_llm_sends_low_reasoning_effort_for_groq(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+    captured = {}
+
+    class FakeResp:
+        headers = {"x-ratelimit-remaining-tokens": "5000", "x-ratelimit-reset-tokens": "5s"}
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        captured["payload"] = json
+        return FakeResp()
+
+    monkeypatch.setattr(composer.httpx, "post", _fake_post)
+    result = composer._call_llm("system", "user")
+    assert result == "ok"
+    assert captured["payload"]["reasoning_effort"] == "low"
+    assert captured["payload"]["max_tokens"] == composer._GROQ_MAX_TOKENS
+    assert composer._rate_limit_state["remaining_tokens"] == 5000.0

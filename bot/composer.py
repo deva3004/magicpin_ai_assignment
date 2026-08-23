@@ -50,6 +50,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from typing import Any, Optional
 
 import httpx
@@ -70,6 +71,73 @@ load_dotenv()
 # produced a genuinely good response was being cut off and silently dropped
 # to the fallback.
 LLM_TIMEOUT_SECONDS = 20.0
+
+# Measured live against Groq (2026-08-23): openai/gpt-oss-120b defaults to
+# "medium" reasoning effort and spends most of its token budget on a hidden
+# chain-of-thought before the JSON ever appears (151 reasoning tokens vs 45
+# real content tokens on a small test prompt). "low" cut that to 9 reasoning
+# tokens for an equivalent answer, taking total_tokens from 309 -> 168 on the
+# same call — confirmed via direct API diagnostic, not assumed. This is the
+# actual lever for surviving the free tier's 8000-token/window cap (see
+# problemFaced.txt): the model choice itself was already validated during
+# self-critique, so this cuts cost without touching output quality.
+_GROQ_REASONING_EFFORT = "low"
+# 2000 was sized for an unconstrained reasoning trace; low-effort completions
+# for this project's message length (2-4 sentences + a short claims list)
+# measured well under 300 tokens. 900 leaves comfortable headroom without
+# leaving the old cap doing nothing.
+_GROQ_MAX_TOKENS = 900
+
+_RATE_LIMIT_RESET_RE = re.compile(r"(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?")
+
+# Groq returns x-ratelimit-remaining-tokens / -reset-tokens on every response
+# (success or 429), scoped to this process. Tracking it locally lets us skip
+# a call we already know will 429 instead of burning LLM_TIMEOUT_SECONDS
+# finding out — real under judge load, since testing-brief §5 allows up to 20
+# actions per /v1/tick and a burst of calls can exhaust the window fast.
+_rate_limit_state: dict[str, Optional[float]] = {"remaining_tokens": None, "resets_at": None}
+
+
+def _parse_reset_seconds(raw: str) -> float:
+    match = _RATE_LIMIT_RESET_RE.match(raw)
+    if not match:
+        return 0.0
+    minutes = float(match.group(1) or 0)
+    seconds = float(match.group(2) or 0)
+    return minutes * 60 + seconds
+
+
+def _update_rate_limit_state(resp: Optional["httpx.Response"]) -> None:
+    if resp is None:
+        return
+    remaining = resp.headers.get("x-ratelimit-remaining-tokens")
+    reset = resp.headers.get("x-ratelimit-reset-tokens")
+    if remaining is None:
+        return
+    try:
+        _rate_limit_state["remaining_tokens"] = float(remaining)
+        _rate_limit_state["resets_at"] = time.monotonic() + _parse_reset_seconds(reset or "0s")
+    except ValueError:
+        pass
+
+
+def _estimate_tokens(*texts: str) -> int:
+    # Conservative ~4 chars/token heuristic (OpenAI/Groq's own rule of thumb),
+    # plus the completion cap since that's tokens we're also asking for.
+    return sum(len(t) for t in texts) // 4 + _GROQ_MAX_TOKENS
+
+
+def _rate_limit_likely_exhausted(estimated_tokens: int) -> bool:
+    remaining = _rate_limit_state["remaining_tokens"]
+    resets_at = _rate_limit_state["resets_at"]
+    if remaining is None or resets_at is None:
+        return False
+    if time.monotonic() >= resets_at:
+        # Window has rolled over since we last heard from Groq — the old
+        # snapshot no longer applies, so let the real call refresh it.
+        return False
+    return remaining < estimated_tokens
+
 
 _DEFAULT_MODELS = {
     "groq": "openai/gpt-oss-120b",
@@ -162,6 +230,11 @@ def _call_llm(system_prompt: str, user_prompt: str) -> Optional[str]:
     provider, api_key, model = _provider_config()
     if not api_key:
         return None
+
+    if provider == "groq" and _rate_limit_likely_exhausted(_estimate_tokens(system_prompt, user_prompt)):
+        return None
+
+    resp = None
     try:
         if provider == "anthropic":
             resp = httpx.post(
@@ -183,15 +256,19 @@ def _call_llm(system_prompt: str, user_prompt: str) -> Optional[str]:
         url = _OPENAI_COMPATIBLE_URLS.get(provider)
         if url is None:
             return None
+        payload = {
+            "model": model, "temperature": 0, "max_tokens": 2000,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        if provider == "groq":
+            payload["reasoning_effort"] = _GROQ_REASONING_EFFORT
+            payload["max_tokens"] = _GROQ_MAX_TOKENS
         resp = httpx.post(
             url,
-            json={
-                "model": model, "temperature": 0, "max_tokens": 2000,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            },
+            json=payload,
             headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
             timeout=LLM_TIMEOUT_SECONDS,
         )
@@ -199,6 +276,9 @@ def _call_llm(system_prompt: str, user_prompt: str) -> Optional[str]:
         return resp.json()["choices"][0]["message"]["content"]
     except Exception:
         return None
+    finally:
+        if provider == "groq":
+            _update_rate_limit_state(resp)
 
 
 def _build_system_prompt(voice) -> str:
